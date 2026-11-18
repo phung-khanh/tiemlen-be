@@ -1,0 +1,15 @@
+version: "3.8"
+services:
+  api:
+    build: .
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    volumes:
+      # Mount code từ máy Mac vào trong container để sửa là chạy ngay
+      - .:/app
+      # Giữ lại thư mục node_modules của container, không bị đè bởi máy Mac
+      - /app/node_modules
+    # Chạy bằng ts-node hoặc nodemon để tự động reload khi code đổi
+    command: yarn dev
