@@ -1,0 +1,35 @@
+import dotenv from "dotenv";
+import { Pool } from "pg";
+
+dotenv.config();
+
+// Lấy connection string từ biến môi trường
+const connectionString = process.env.DATABASE_URL;
+
+export const pool = new Pool({
+  connectionString,
+  // Thêm cấu hình SSL nếu cần thiết cho Supabase trên Vercel
+  ssl: {
+    rejectUnauthorized: false,
+  },
+});
+
+pool.on("error", (error) => {
+  console.error("Unexpected PostgreSQL pool error:", error);
+});
+
+export const connectDB = async (): Promise<void> => {
+  if (!connectionString) {
+    throw new Error("DATABASE_URL is not defined");
+  }
+
+  try {
+    await pool.query("SELECT 1");
+    console.log("Connected to Supabase PostgreSQL (Pooler)");
+  } catch (error) {
+    console.error("Failed to connect to database:", error);
+    throw error;
+  }
+};
+
+export default connectDB;
