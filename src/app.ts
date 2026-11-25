@@ -53,12 +53,12 @@ app.use(
       error instanceof HttpError
         ? error.statusCode
         : error?.name === "ValidationError"
-        ? 400
-        : error?.code === "23505"
-          ? 409
-          : error?.code === "23514" || error?.code === "22P02"
-            ? 400
-            : 500;
+          ? 400
+          : error?.code === "23505"
+            ? 409
+            : error?.code === "23514" || error?.code === "22P02"
+              ? 400
+              : 500;
     console.error("Request failed:", error);
     res.status(statusCode).json({
       message:

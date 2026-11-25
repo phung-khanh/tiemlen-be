@@ -18,12 +18,86 @@ const publicOrderFields = `
   payment_method AS "paymentMethod", payment_status AS "paymentStatus",
   subtotal, shipping_fee AS "shippingFee", discount_amount AS "discountAmount",
   total, voucher_code AS "voucherCode", shipping_address AS "shippingAddress",
-  tracking_number AS "trackingNumber", delivery_note AS "deliveryNote",
+  shipping_carrier AS "shippingCarrier", tracking_number AS "trackingNumber",
+  estimated_delivery_date AS "estimatedDeliveryDate",
+  delivery_note AS "deliveryNote",
   customer_note AS "customerNote", payment_expires_at AS "paymentExpiresAt",
   created_at AS "createdAt"
 `;
 
 const toNumber = (value: string | number) => Number(value);
+const voucherCodePattern = /^[A-Z0-9][A-Z0-9_-]{2,31}$/;
+
+type VoucherRule = {
+  discount_type: "fixed" | "percent";
+  discount_value: string;
+  minimum_subtotal: string;
+  maximum_discount: string | null;
+  usage_limit: number | null;
+  used_count: number;
+};
+
+const normalizeVoucherCode = (code: string) => {
+  const normalized = code.trim().toUpperCase();
+  if (!voucherCodePattern.test(normalized)) {
+    throw new HttpError(400, "Voucher code format is invalid.");
+  }
+  return normalized;
+};
+
+const calculateVoucherDiscount = (voucher: VoucherRule, subtotal: number) => {
+  if (subtotal < toNumber(voucher.minimum_subtotal)) {
+    throw new HttpError(400, "Order subtotal does not meet the voucher minimum.");
+  }
+  if (
+    voucher.usage_limit !== null &&
+    voucher.used_count >= voucher.usage_limit
+  ) {
+    throw new HttpError(400, "Voucher usage limit has been reached.");
+  }
+
+  let discount =
+    voucher.discount_type === "percent"
+      ? (subtotal * toNumber(voucher.discount_value)) / 100
+      : toNumber(voucher.discount_value);
+  if (voucher.maximum_discount !== null) {
+    discount = Math.min(discount, toNumber(voucher.maximum_discount));
+  }
+  return Math.min(subtotal, Math.round(discount));
+};
+
+export const previewVoucher = async (userId: string, rawCode: string) => {
+  if (typeof rawCode !== "string") {
+    throw new HttpError(400, "Voucher code is required.");
+  }
+  const code = normalizeVoucherCode(rawCode);
+  const { rows: cartRows } = await pool.query<{
+    price: string;
+    quantity: number;
+  }>(
+    `SELECT p.price, c.quantity
+     FROM cart_items c JOIN products p ON p.id = c.product_id
+     WHERE c.user_id = $1 AND p.is_active = TRUE`,
+    [userId],
+  );
+  if (!cartRows.length) throw new HttpError(400, "Your cart is empty.");
+  const subtotal = cartRows.reduce(
+    (sum, item) => sum + toNumber(item.price) * item.quantity,
+    0,
+  );
+  const { rows } = await pool.query<VoucherRule>(
+    `SELECT discount_type, discount_value, minimum_subtotal,
+            maximum_discount, usage_limit, used_count
+     FROM vouchers WHERE code = $1 AND is_active = TRUE
+       AND (starts_at IS NULL OR starts_at <= NOW())
+       AND (expires_at IS NULL OR expires_at > NOW())`,
+    [code],
+  );
+  const voucher = rows[0];
+  if (!voucher) throw new HttpError(400, "Voucher is invalid or expired.");
+  const discountAmount = calculateVoucherDiscount(voucher, subtotal);
+  return { code, subtotal, discountAmount };
+};
 
 const ensureAddress = (address: Address) => {
   const required = [
@@ -36,6 +110,29 @@ const ensureAddress = (address: Address) => {
   ];
   if (required.some((value) => typeof value !== "string" || !value.trim())) {
     throw new HttpError(400, "Please provide a complete delivery address.");
+  }
+  const fields: Array<[string, number]> = [
+    [address.recipientName, 100],
+    [address.province, 100],
+    [address.district, 100],
+    [address.ward, 100],
+    [address.street, 300],
+  ];
+  if (
+    fields.some(
+      ([value, maxLength]) =>
+        value.length > maxLength || /[\u0000-\u001f\u007f]/.test(value),
+    )
+  ) {
+    throw new HttpError(400, "Delivery address contains invalid details.");
+  }
+  const digits = address.phone.replace(/\D/g, "");
+  if (
+    !/^\+?[0-9 ()-]{8,20}$/.test(address.phone.trim()) ||
+    digits.length < 8 ||
+    digits.length > 15
+  ) {
+    throw new HttpError(400, "Phone number format is invalid.");
   }
 };
 
@@ -385,16 +482,12 @@ export const createOrder = async (
       0,
     );
     let discount = 0;
-    const voucherCode = input.voucherCode?.trim().toUpperCase() || null;
+    const rawVoucherCode = input.voucherCode?.trim();
+    const voucherCode = rawVoucherCode
+      ? normalizeVoucherCode(rawVoucherCode)
+      : null;
     if (voucherCode) {
-      const { rows: vouchers } = await client.query<{
-        discount_type: "fixed" | "percent";
-        discount_value: string;
-        minimum_subtotal: string;
-        maximum_discount: string | null;
-        usage_limit: number | null;
-        used_count: number;
-      }>(
+      const { rows: vouchers } = await client.query<VoucherRule>(
         `SELECT discount_type, discount_value, minimum_subtotal,
                 maximum_discount, usage_limit, used_count
          FROM vouchers WHERE code = $1 AND is_active = TRUE
@@ -405,20 +498,7 @@ export const createOrder = async (
       );
       const voucher = vouchers[0];
       if (!voucher) throw new HttpError(400, "Voucher is invalid or expired.");
-      if (subtotal < toNumber(voucher.minimum_subtotal)) {
-        throw new HttpError(400, "Order subtotal does not meet the voucher minimum.");
-      }
-      if (voucher.usage_limit !== null && voucher.used_count >= voucher.usage_limit) {
-        throw new HttpError(400, "Voucher usage limit has been reached.");
-      }
-      discount =
-        voucher.discount_type === "percent"
-          ? (subtotal * toNumber(voucher.discount_value)) / 100
-          : toNumber(voucher.discount_value);
-      if (voucher.maximum_discount !== null) {
-        discount = Math.min(discount, toNumber(voucher.maximum_discount));
-      }
-      discount = Math.min(subtotal, Math.round(discount));
+      discount = calculateVoucherDiscount(voucher, subtotal);
     }
 
     let shippingFee = 0;
@@ -564,15 +644,60 @@ export const updateOrder = async (
   orderId: string,
   input: {
     status?: string;
-    trackingNumber?: string;
+    trackingNumber?: string | null;
+    shippingCarrier?: string | null;
+    estimatedDeliveryDate?: string | null;
     deliveryNote?: string;
     paymentStatus?: string;
   },
   changedBy?: string,
 ) => {
-  const allowedStatuses = ["confirmed", "processing", "shipped", "delivered", "cancelled"];
+  const allowedStatuses = [
+    "confirmed",
+    "processing",
+    "picked_up",
+    "in_transit",
+    "shipped",
+    "delivered",
+    "cancelled",
+  ];
   if (input.status && !allowedStatuses.includes(input.status)) {
     throw new HttpError(400, "Unsupported order status.");
+  }
+  if (
+    input.trackingNumber !== undefined &&
+    input.trackingNumber !== null &&
+    (input.trackingNumber.length > 80 ||
+      (input.trackingNumber.trim() !== "" &&
+        !/^[A-Za-z0-9][A-Za-z0-9-]{2,79}$/.test(
+          input.trackingNumber.trim(),
+        )))
+  ) {
+    throw new HttpError(400, "Tracking number format is invalid.");
+  }
+  if (
+    input.shippingCarrier !== undefined &&
+    input.shippingCarrier !== null &&
+    (input.shippingCarrier.length > 80 ||
+      input.shippingCarrier.trim().length > 80 ||
+      /[\u0000-\u001f\u007f]/.test(input.shippingCarrier))
+  ) {
+    throw new HttpError(400, "Shipping carrier is invalid.");
+  }
+  if (
+    input.estimatedDeliveryDate !== undefined &&
+    input.estimatedDeliveryDate !== null &&
+    input.estimatedDeliveryDate !== "" &&
+    (!/^\d{4}-\d{2}-\d{2}$/.test(input.estimatedDeliveryDate) ||
+      Number.isNaN(Date.parse(`${input.estimatedDeliveryDate}T00:00:00Z`)) ||
+      new Date(`${input.estimatedDeliveryDate}T00:00:00Z`)
+        .toISOString()
+        .slice(0, 10) !== input.estimatedDeliveryDate)
+  ) {
+    throw new HttpError(400, "Estimated delivery date is invalid.");
+  }
+  if (input.deliveryNote !== undefined && input.deliveryNote.length > 2000) {
+    throw new HttpError(400, "Delivery note is too long.");
   }
   if (input.paymentStatus && input.paymentStatus !== "paid") {
     throw new HttpError(400, "Staff can only confirm received payments.");
@@ -617,7 +742,9 @@ export const updateOrder = async (
       const transitions: Record<string, string[]> = {
         pending_payment: ["cancelled"],
         confirmed: ["processing", "cancelled"],
-        processing: ["shipped", "cancelled"],
+        processing: ["picked_up", "in_transit", "shipped", "cancelled"],
+        picked_up: ["in_transit", "delivered"],
+        in_transit: ["delivered"],
         shipped: ["delivered"],
       };
       if (input.status !== current.status && !transitions[current.status]?.includes(input.status)) {
@@ -674,21 +801,28 @@ export const updateOrder = async (
 
     const { rows } = await client.query(
       `UPDATE orders SET
-         status = COALESCE($2, CASE WHEN $5 = 'paid' AND status = 'pending_payment'
+         status = COALESCE($2, CASE WHEN $10 = 'paid' AND status = 'pending_payment'
            THEN 'confirmed' ELSE status END),
-         tracking_number = COALESCE($3, tracking_number),
-         delivery_note = COALESCE($4, delivery_note),
+         tracking_number = CASE WHEN $3 THEN NULLIF($4, '') ELSE tracking_number END,
+         delivery_note = COALESCE($5, delivery_note),
+         shipping_carrier = CASE WHEN $6 THEN NULLIF($7, '') ELSE shipping_carrier END,
+         estimated_delivery_date = CASE WHEN $8 THEN $9::date ELSE estimated_delivery_date END,
          payment_status = CASE
            WHEN $2 = 'cancelled' AND payment_status = 'pending' THEN 'failed'
-           ELSE COALESCE($5, payment_status)
+           ELSE COALESCE($10, payment_status)
          END,
          updated_at = NOW()
        WHERE id = $1 RETURNING ${publicOrderFields}`,
       [
         orderId,
         input.status || null,
+        input.trackingNumber !== undefined,
         input.trackingNumber?.trim() || null,
         input.deliveryNote?.trim() || null,
+        input.shippingCarrier !== undefined,
+        input.shippingCarrier?.trim() || null,
+        input.estimatedDeliveryDate !== undefined,
+        input.estimatedDeliveryDate || null,
         input.paymentStatus || null,
       ],
     );
@@ -853,24 +987,27 @@ export const createVoucher = async (input: {
     !input ||
     typeof input !== "object" ||
     typeof input.code !== "string" ||
-    !input.code.trim() ||
-    input.code.trim().length > 50 ||
     !["fixed", "percent"].includes(input.discountType) ||
     !Number.isFinite(input.discountValue) ||
-    input.discountValue <= 0 ||
+    input.discountValue < 1 ||
     (input.discountType === "percent" && input.discountValue > 100) ||
+    (input.discountType === "fixed" && !Number.isInteger(input.discountValue)) ||
     (input.minimumSubtotal !== undefined &&
-      (!Number.isFinite(input.minimumSubtotal) || input.minimumSubtotal < 0)) ||
+      (!Number.isInteger(input.minimumSubtotal) || input.minimumSubtotal < 0)) ||
     (input.maximumDiscount !== undefined &&
-      (!Number.isFinite(input.maximumDiscount) || input.maximumDiscount < 0)) ||
+      (!Number.isInteger(input.maximumDiscount) || input.maximumDiscount < 0)) ||
     (input.usageLimit !== undefined &&
-      (!Number.isInteger(input.usageLimit) || input.usageLimit < 1)) ||
+      (!Number.isInteger(input.usageLimit) ||
+        input.usageLimit < 1 ||
+        input.usageLimit > 1_000_000)) ||
     (input.expiresAt !== undefined &&
       (typeof input.expiresAt !== "string" ||
-        Number.isNaN(Date.parse(input.expiresAt))))
+        Number.isNaN(Date.parse(input.expiresAt)) ||
+        Date.parse(input.expiresAt) <= Date.now()))
   ) {
     throw new HttpError(400, "Voucher details are invalid.");
   }
+  const code = normalizeVoucherCode(input.code);
   const { rows } = await pool.query(
     `INSERT INTO vouchers
        (code, discount_type, discount_value, minimum_subtotal,
@@ -879,7 +1016,7 @@ export const createVoucher = async (input: {
      RETURNING id, code, discount_type AS "discountType",
        discount_value AS "discountValue", is_active AS "isActive"`,
     [
-      input.code.trim().toUpperCase(),
+      code,
       input.discountType,
       input.discountValue,
       input.minimumSubtotal || 0,
@@ -1092,8 +1229,8 @@ export const getStaffDashboard = async () => {
   const { rows } = await pool.query(
     `SELECT
        (SELECT COUNT(*) FROM orders WHERE created_at::date = CURRENT_DATE) AS "ordersToday",
-       (SELECT COUNT(*) FROM orders WHERE status IN ('pending_payment', 'confirmed', 'processing')) AS "openOrders",
-       (SELECT COUNT(*) FROM orders WHERE status = 'shipped') AS "inTransit",
+       (SELECT COUNT(*) FROM orders WHERE status IN ('pending_payment', 'confirmed', 'processing', 'picked_up', 'in_transit', 'shipped')) AS "openOrders",
+       (SELECT COUNT(*) FROM orders WHERE status IN ('picked_up', 'in_transit', 'shipped')) AS "inTransit",
        (SELECT COALESCE(SUM(total), 0) FROM orders
         WHERE payment_status = 'paid' AND created_at::date = CURRENT_DATE) AS "revenueToday",
        (SELECT COUNT(*) FROM products WHERE is_active AND stock_quantity <= reorder_threshold) AS "lowStock"`,

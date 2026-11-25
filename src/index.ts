@@ -4,7 +4,6 @@ import connectDB from "./config/db";
 import { migrate } from "./db/migrate";
 import { expireUnpaidOrders } from "./services/commerce";
 
-
 dotenv.config();
 
 const PORT = process.env.PORT || 4000;

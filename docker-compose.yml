@@ -2,14 +2,19 @@ version: "3.8"
 services:
   api:
     build: .
+    container_name: app-backend # Đặt tên cố định để dễ quản lý
     ports:
       - "4000:4000"
     env_file:
-      - .env
+      - .env # Chắc chắn file .env đã có DATABASE_URL trỏ về host.docker.internal
     volumes:
-      # Mount code từ máy Mac vào trong container để sửa là chạy ngay
       - .:/app
-      # Giữ lại thư mục node_modules của container, không bị đè bởi máy Mac
       - /app/node_modules
-    # Chạy bằng ts-node hoặc nodemon để tự động reload khi code đổi
     command: yarn dev
+    networks:
+      - app-network
+    restart: unless-stopped # THÊM DÒNG NÀY
+
+networks:
+  app-network:
+    external: true

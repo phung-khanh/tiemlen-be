@@ -69,6 +69,15 @@ export const createOrder = asyncHandler(
   },
 );
 
+export const validateVoucher = asyncHandler(
+  async (req: AuthenticatedRequest, res) => {
+    if (typeof req.body?.code !== "string") {
+      throw new HttpError(400, "Voucher code is required.");
+    }
+    res.json(await commerce.previewVoucher(userId(req), req.body.code));
+  },
+);
+
 export const getOrders = asyncHandler(
   async (req: AuthenticatedRequest, res) => {
     res.json(await commerce.getOrders(userId(req)));
@@ -82,15 +91,29 @@ export const getStaffOrders = asyncHandler(
 );
 
 export const updateOrder = asyncHandler(async (req: AuthenticatedRequest, res) => {
-  for (const field of ["status", "trackingNumber", "deliveryNote", "paymentStatus"]) {
+  for (const field of [
+    "status",
+    "trackingNumber",
+    "shippingCarrier",
+    "estimatedDeliveryDate",
+    "deliveryNote",
+    "paymentStatus",
+  ]) {
     if (req.body?.[field] !== undefined && typeof req.body[field] !== "string") {
-      throw new HttpError(400, `Invalid ${field}.`);
+      if (
+        !["trackingNumber", "shippingCarrier", "estimatedDeliveryDate"].includes(field) ||
+        req.body[field] !== null
+      ) {
+        throw new HttpError(400, `Invalid ${field}.`);
+      }
     }
   }
   res.json(
     await commerce.updateOrder(getParam(req.params.id), {
       status: req.body?.status,
       trackingNumber: req.body?.trackingNumber,
+      shippingCarrier: req.body?.shippingCarrier,
+      estimatedDeliveryDate: req.body?.estimatedDeliveryDate,
       deliveryNote: req.body?.deliveryNote,
       paymentStatus: req.body?.paymentStatus,
     }, userId(req)),

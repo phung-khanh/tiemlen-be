@@ -10,6 +10,7 @@ commerceRouter.get("/settings/cod", controller.getCodSettings);
 commerceRouter.patch("/settings/cod", checkLogin, isAdmin, controller.updateCodSettings);
 commerceRouter.get("/vouchers", checkLogin, isStoreStaff, controller.listVouchers);
 commerceRouter.post("/vouchers", checkLogin, isStoreStaff, controller.createVoucher);
+commerceRouter.post("/vouchers/validate", checkLogin, controller.validateVoucher);
 commerceRouter.patch("/vouchers/:id", checkLogin, isStoreStaff, controller.setVoucherStatus);
 commerceRouter.get("/dashboard", checkLogin, isStoreStaff, controller.getDashboard);
 commerceRouter.get("/staff/orders", checkLogin, isStoreStaff, controller.getStaffOrders);

@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS vouchers (
   discount_type TEXT NOT NULL CHECK (discount_type IN ('fixed', 'percent')),
   discount_value NUMERIC(12, 2) NOT NULL CHECK (discount_value > 0),
   minimum_subtotal NUMERIC(12, 2) NOT NULL DEFAULT 0 CHECK (minimum_subtotal >= 0),
-  maximum_discount NUMERIC(12, 2),
+  maximum_discount NUMERIC(12, 2) CHECK (maximum_discount IS NULL OR maximum_discount >= 0),
   usage_limit INTEGER CHECK (usage_limit IS NULL OR usage_limit > 0),
   used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
   starts_at TIMESTAMPTZ,
@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS orders (
   order_number TEXT NOT NULL UNIQUE,
   user_id UUID NOT NULL REFERENCES users(id),
   status TEXT NOT NULL DEFAULT 'pending_payment'
-    CHECK (status IN ('pending_payment', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled')),
+    CHECK (status IN ('pending_payment', 'confirmed', 'processing', 'picked_up', 'in_transit', 'shipped', 'delivered', 'cancelled')),
   payment_method TEXT NOT NULL CHECK (payment_method IN ('cod', 'vnpay', 'bank_qr')),
   payment_status TEXT NOT NULL DEFAULT 'pending'
     CHECK (payment_status IN ('pending', 'paid', 'failed', 'refunded')),
@@ -126,7 +126,9 @@ CREATE TABLE IF NOT EXISTS orders (
   total NUMERIC(12, 2) NOT NULL CHECK (total >= 0),
   voucher_code TEXT,
   shipping_address JSONB NOT NULL,
+  shipping_carrier TEXT,
   tracking_number TEXT,
+  estimated_delivery_date DATE,
   delivery_note TEXT,
   customer_note TEXT,
   payment_expires_at TIMESTAMPTZ,
@@ -134,6 +136,30 @@ CREATE TABLE IF NOT EXISTS orders (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_expires_at TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_carrier TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS estimated_delivery_date DATE;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'orders'::regclass
+      AND conname = 'orders_status_check'
+      AND pg_get_constraintdef(oid) LIKE '%picked_up%'
+      AND pg_get_constraintdef(oid) LIKE '%in_transit%'
+  ) THEN
+    ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check;
+    ALTER TABLE orders ADD CONSTRAINT orders_status_check
+      CHECK (status IN ('pending_payment', 'confirmed', 'processing', 'picked_up', 'in_transit', 'shipped', 'delivered', 'cancelled'));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'vouchers'::regclass
+      AND conname = 'vouchers_maximum_discount_check'
+  ) THEN
+    ALTER TABLE vouchers ADD CONSTRAINT vouchers_maximum_discount_check
+      CHECK (maximum_discount IS NULL OR maximum_discount >= 0) NOT VALID;
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS orders_user_created_idx ON orders (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS orders_status_created_idx ON orders (status, created_at DESC);
 CREATE INDEX IF NOT EXISTS orders_payment_expiry_idx
